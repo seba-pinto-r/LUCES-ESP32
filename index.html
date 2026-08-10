@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Control remoto ESP32</title>
+
+  <!-- Cliente MQTT para navegador -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #0f172a;
+      --card: #1e293b;
+      --muted: #94a3b8;
+      --green: #16a34a;
+      --red: #dc2626;
+      --blue: #2563eb;
+      --orange: #f59e0b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 22px;
+      font-family: Arial, sans-serif;
+      background: var(--background);
+      color: #f8fafc;
+    }
+
+    main {
+      width: min(850px, 100%);
+      margin: 0 auto;
+    }
+
+    h1 { margin-bottom: 4px; }
+    .subtitle { color: var(--muted); margin-top: 0; }
+
+    .settings,
+    .summary,
+    .light-card {
+      background: var(--card);
+      border-radius: 14px;
+    }
+
+    .settings {
+      margin: 20px 0;
+      padding: 18px;
+    }
+
+    .settings h2 {
+      margin-top: 0;
+      font-size: 18px;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #475569;
+      border-radius: 8px;
+      background: #0f172a;
+      color: white;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    .connect { background: var(--blue); margin-top: 14px; }
+    .on { background: var(--green); }
+    .off { background: var(--red); }
+
+    .summary {
+      padding: 15px;
+      margin: 18px 0;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    #connection.connected { color: #86efac; }
+    #connection.connecting { color: #fde68a; }
+    #connection.disconnected { color: #fca5a5; }
+
+    #lights {
+      display: grid;
+      gap: 10px;
+    }
+
+    .light-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 15px;
+      gap: 12px;
+    }
+
+    .light-name { font-weight: bold; }
+    .light-state { color: var(--muted); margin-top: 6px; font-size: 13px; }
+
+    .controls {
+      display: flex;
+      gap: 7px;
+    }
+
+    @media (max-width: 520px) {
+      .light-card { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>💡 Control remoto de luces</h1>
+    <p class="subtitle">ESP32 domótico mediante EMQX MQTT seguro</p>
+
+    <section class="settings">
+      <h2>Configuración de EMQX</h2>
+
+      <div class="settings-grid">
+        <label>
+          Host WebSocket TLS
+          <input id="host" placeholder="xxxx.emqxsl.com">
+        </label>
+
+        <label>
+          Puerto WSS
+          <input id="port" type="number" placeholder="8084">
+        </label>
+
+        <label>
+          Ruta WebSocket
+          <input id="path" value="/mqtt">
+        </label>
+
+        <label>
+          Usuario MQTT
+          <input id="username" autocomplete="username">
+        </label>
+
+        <label>
+          Contraseña MQTT
+          <input id="password" type="password" autocomplete="current-password">
+        </label>
+      </div>
+
+      <button class="connect" id="connectButton">Conectar</button>
+    </section>
+
+    <section class="summary">
+      <strong id="count">Esperando estado del ESP32…</strong>
+      <strong id="connection" class="disconnected">🔴 DESCONECTADO</strong>
+    </section>
+
+    <section id="lights"></section>
+  </main>
+
+  <script>
+    const TOPIC_COMMAND = "SP/DOMOTICA/LUCES/comando";
+    const TOPIC_STATE = "SP/DOMOTICA/LUCES/estado";
+
+    let client = null;
+
+    const defaultLights = [
+      "Luz Living",
+      "Luz Cocina",
+      "Luz Comedor",
+      "Luz Dormitorio Principal",
+      "Luz Dormitorio 2",
+      "Luz Baño",
+      "Luz Pasillo",
+      "Luz Patio",
+      "Luz Entrada",
+      "Luz Garage"
+    ];
+
+    let lights = defaultLights.map((name, index) => ({
+      id: index + 1,
+      name,
+      state: false
+    }));
+
+    function setConnection(text, status) {
+      const element = document.getElementById("connection");
+      element.textContent = text;
+      element.className = status;
+    }
+
+    function renderLights() {
+      const enabledCount = lights.filter(light => light.state).length;
+
+      document.getElementById("count").textContent =
+        `${enabledCount} / ${lights.length} luces encendidas`;
+
+      document.getElementById("lights").innerHTML = lights.map(light => `
+        <article class="light-card">
+          <div>
+            <div class="light-name">💡 ${escapeHtml(light.name)}</div>
+            <div class="light-state">
+              ${light.state ? "🟢 ENCENDIDA" : "🔴 APAGADA"}
+            </div>
+          </div>
+
+          <div class="controls">
+            <button class="on" onclick="sendCommand(${light.id}, true)">ON</button>
+            <button class="off" onclick="sendCommand(${light.id}, false)">OFF</button>
+          </div>
+        </article>
+      `).join("");
+    }
+
+    function escapeHtml(value) {
+      const div = document.createElement("div");
+      div.textContent = value;
+      return div.innerHTML;
+    }
+
+    function sendCommand(lightId, state) {
+      if (!client || !client.connected) {
+        alert("No hay conexión con EMQX.");
+        return;
+      }
+
+      const payload = JSON.stringify({
+        light: lightId,
+        state: state ? "ON" : "OFF"
+      });
+
+      client.publish(TOPIC_COMMAND, payload, { qos: 1, retain: false });
+    }
+
+    function saveConfiguration() {
+      localStorage.setItem("emqxHost", document.getElementById("host").value.trim());
+      localStorage.setItem("emqxPort", document.getElementById("port").value.trim());
+      localStorage.setItem("emqxPath", document.getElementById("path").value.trim());
+      localStorage.setItem("emqxUser", document.getElementById("username").value);
+    }
+
+    function loadConfiguration() {
+      document.getElementById("host").value = localStorage.getItem("emqxHost") || "";
+      document.getElementById("port").value = localStorage.getItem("emqxPort") || "";
+      document.getElementById("path").value = localStorage.getItem("emqxPath") || "/mqtt";
+      document.getElementById("username").value = localStorage.getItem("emqxUser") || "";
+    }
+
+    function connect() {
+      const host = document.getElementById("host").value.trim();
+      const port = document.getElementById("port").value.trim();
+      let path = document.getElementById("path").value.trim() || "/mqtt";
+      const username = document.getElementById("username").value;
+      const password = document.getElementById("password").value;
+
+      if (!host || !port || !username || !password) {
+        alert("Completa host, puerto WSS, usuario y contraseña.");
+        return;
+      }
+
+      if (!path.startsWith("/")) path = "/" + path;
+
+      if (client) {
+        client.end(true);
+      }
+
+      saveConfiguration();
+
+      // El puerto no está fijado: usa exactamente el puerto WSS/TLS
+      // mostrado en la consola de tu despliegue EMQX.
+      const url = `wss://${host}:${port}${path}`;
+
+      setConnection("🟡 CONECTANDO…", "connecting");
+
+      client = mqtt.connect(url, {
+        clientId: `dashboard-remoto-${Math.random().toString(16).slice(2)}`,
+        username,
+        password,
+        clean: true,
+        reconnectPeriod: 4000,
+        connectTimeout: 10000,
+        protocolVersion: 4
+      });
+
+      client.on("connect", () => {
+        setConnection("🟢 CONECTADO A EMQX", "connected");
+        client.subscribe(TOPIC_STATE, { qos: 1 });
+      });
+
+      client.on("reconnect", () => {
+        setConnection("🟡 RECONECTANDO…", "connecting");
+      });
+
+      client.on("close", () => {
+        setConnection("🔴 DESCONECTADO", "disconnected");
+      });
+
+      client.on("error", error => {
+        console.error("Error MQTT:", error);
+      });
+
+      client.on("message", (topic, message) => {
+        if (topic !== TOPIC_STATE) return;
+
+        try {
+          const received = JSON.parse(message.toString());
+
+          if (!Array.isArray(received.lights)) return;
+
+          lights = received.lights.map(light => ({
+            id: Number(light.id),
+            name: String(light.name),
+            state: Boolean(light.state)
+          }));
+
+          renderLights();
+        } catch (error) {
+          console.error("Estado JSON inválido:", error);
+        }
+      });
+    }
+
+    document.getElementById("connectButton").addEventListener("click", connect);
+
+    loadConfiguration();
+    renderLights();
+  </script>
+</body>
+</html>
