@@ -115,9 +115,17 @@
     });
 
     client.on("connect", () => {
-      mostrarConexion("🟢 CONECTADO A EMQX", "green");
-      client.subscribe([TOPIC_STATE, TOPIC_AVAILABILITY], { qos: 1 });
-    });
+  mostrarConexion("🟢 CONECTADO A EMQX", "green");
+
+  // Oculta usuario y contraseña al conectar correctamente.
+  document.getElementById("loginBox").style.display = "none";
+
+  // Borra la contraseña del campo visible.
+  document.getElementById("password").value = "";
+
+  client.subscribe(TOPIC_STATE, { qos: 1 });
+  client.subscribe(TOPIC_AVAILABILITY, { qos: 1 });
+});
 
     client.on("reconnect", () => {
       mostrarConexion("🟡 RECONECTANDO…", "yellow");
